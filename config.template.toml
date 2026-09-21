@@ -1,0 +1,44 @@
+# AHUT 晚寝自动签到 - 配置模板
+#
+# 用法：复制本文件为 config.toml，然后填入真实信息。
+#   Linux / macOS : cp config.template.toml config.toml
+#   Windows       : copy config.template.toml config.toml
+#
+# config.toml 已被 .gitignore 忽略，不会提交到仓库，可以放心写学号密码。
+
+# ── 账号列表 ─────────────────────────────────────────────
+# 每个 [[users]] 块代表一个账号，需要几个就写几个，顺序无关。
+[[users]]
+id       = "你的学号"        # 必填，纯数字
+password = "你的密码"        # 可省略，省略时默认使用学校统一初始密码
+alias    = "用户 1"          # 可省略，仅用于日志与推送报表里的称呼
+
+# [[users]]
+# id       = "第二个学号"
+# password = "第二个密码"
+# alias    = "用户 2"
+
+# ── 通知推送（全部可选，留空即关闭对应通道）──────────────
+[notify.serverchan]
+# Server 酱 SendKey，用于发送每日签到结果报表到微信。
+# 申请地址 https://sct.ftqq.com/ ，形如 SCTxxxxxxxxxxxxxxxx
+sendkey = ""
+
+[notify.ntfy]
+# ntfy 频道 Topic，仅在签到失败时触发高优先级强穿透告警。
+# 手机安装 ntfy App 后订阅同名 Topic 即可收到，无需注册。
+topic  = ""
+# 自建 ntfy 服务器时改这里，用官方服务保持默认即可
+server = "https://ntfy.sh"
+
+# ── 运行日志 ─────────────────────────────────────────────
+[log]
+# 日志文件路径，相对路径按本文件所在目录解析。
+# 留空则只输出到控制台（配合 cron / 任务计划程序时建议填写）
+file = "run.log"
+
+# ── 签到行为 ─────────────────────────────────────────────
+[sign]
+# 调试开关：true 时忽略服务端的签到时间窗口限制。
+# 平时务必保持 false，否则可能被风控。
+debug_mode = false
