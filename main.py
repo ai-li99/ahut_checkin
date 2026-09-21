@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-AHUT 晚寝自动签到 - GitHub Actions / 云端无头运行版
+AHUT 晚寝自动签到 - 本地 / 服务器定时运行版
 
-环境变量：
-  STUDENT_IDS         - 学号列表，多个用英文分号分隔（必填）
-  PASSWORDS           - 密码列表，多个用英文分号分隔（可选，默认 Ahgydx@920）
-  DEBUG_MODE          - 调试模式：忽略签到时间限制（可选，true/false，默认 false）
+配置来源为同目录下的 config.toml（不随仓库提交，请从 config.template.toml 复制）：
+  [[users]]             账号列表，每块包含 id / password / alias
+  [notify.serverchan]   Server 酱 SendKey，发送每日签到结果报表
+  [notify.ntfy]         ntfy Topic，仅在签到失败时发送高优先级强穿透告警
+  [log]                 日志文件路径，留空则只打印到控制台
+  [sign]                debug_mode 调试开关，忽略服务端签到时间限制
 
-【推送配置】（可选）
-  SERVERCHAN_SENDKEY  - Server 酱 SendKey（微信公众号日常签到结果推送）
-  NTFY_TOPIC          - ntfy 专属频道 Topic（仅在签到失败时发送高优先级强穿透告警）
-
-工作流示例（GitHub Actions）：
-  通过 GitHub 仓库 Settings -> Secrets and variables -> Actions 配置以上变量。
+定时运行（脚本本身只执行一次，定时交给系统调度器）：
+  Linux    crontab 中加入（每天 21:30，按北京时间）：
+             30 21 * * * TZ=Asia/Shanghai /path/to/.venv/bin/python -u main.py
+  Windows  「任务计划程序」新建任务，操作填 .venv\\Scripts\\python.exe，参数填 main.py，
+           「起始于」填项目目录，并勾选「不管用户是否登录都要运行」。
 """
 import asyncio
 import base64
@@ -21,10 +22,11 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-import os
+from pathlib import Path
 import random
 import sys
 import time
+import tomllib
 from urllib.parse import urlparse
 
 import aiohttp
@@ -35,9 +37,11 @@ from notifier import Notifier, build_sign_result_text
 # API 与基础常量
 # ============================================================
 
-user_name = ["249084139", "249084141"]
-
 API_BASE_URL = "https://xskq.ahut.edu.cn/api"
+
+CONFIG_PATH = Path(__file__).resolve().with_name("config.toml")
+DEFAULT_PASSWORD = "Ahgydx@920"
+
 WEB_DICT = {
     "token_api": f"{API_BASE_URL}/flySource-auth/oauth/token",
     "task_id_api": f"{API_BASE_URL}/flySource-yxgl/dormSignTask/getStudentTaskPage?userDataType=student&current=1&size=15",
@@ -85,7 +89,7 @@ class User:
     student_Id: int
     alias: str = "用户"
     username: str = ""
-    password: str = "Ahgydx@920"
+    password: str = DEFAULT_PASSWORD
     latitude: float = 0.0
     longitude: float = 0.0
     token: str = None
@@ -361,29 +365,56 @@ async def sign_in(user: User, debug: bool = False, sign_lock=None) -> dict:
     }
 
 
-def load_users_from_env():
-    """从环境变量加载用户列表"""
-    # student_ids_str = os.environ.get("STUDENT_IDS", "").strip()
-    # passwords_str = os.environ.get("PASSWORDS", "").strip()
-    student_ids_str = ";".join(user_name)
-    passwords_str = ";".join(["Ahgydx@920"] * len(user_name))
+def load_config() -> dict:
+    """读取 config.toml，缺失或格式错误时给出明确指引并退出"""
+    if not CONFIG_PATH.exists():
+        logger.error(f"未找到配置文件：{CONFIG_PATH}")
+        logger.error("请复制 config.template.toml 为 config.toml 并填写学号密码。")
+        sys.exit(1)
+    try:
+        with CONFIG_PATH.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        logger.error(f"config.toml 格式错误，请检查语法：{e}")
+        sys.exit(1)
 
-    if not student_ids_str:
-        logger.error("环境变量 STUDENT_IDS 未设置！请在 GitHub 仓库 Secrets 中配置。")
+
+def attach_file_logger(config: dict) -> None:
+    """按配置挂载 UTF-8 文件日志，不依赖 shell 重定向，跨平台行为一致"""
+    log_file = str(config.get("log", {}).get("file", "")).strip()
+    if not log_file:
+        return
+    log_path = Path(log_file)
+    if not log_path.is_absolute():
+        log_path = Path(__file__).resolve().parent / log_path
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(handler)
+
+
+def load_users(config: dict) -> list[User]:
+    """从配置文件的 [[users]] 列表加载账号"""
+    entries = config.get("users", [])
+    if not entries:
+        logger.error("config.toml 中未配置任何 [[users]] 条目。")
         return []
 
-    student_ids = [s.strip() for s in student_ids_str.split(";") if s.strip()]
-    passwords = [p.strip() for p in passwords_str.split(";") if passwords_str]
-
     users = []
-    for i, sid in enumerate(student_ids):
-        pwd = passwords[i] if i < len(passwords) else "Ahgydx@920"
+    for i, entry in enumerate(entries):
+        sid = str(entry.get("id", "")).strip()
         if not sid.isdigit():
-            logger.warning(f"用户配置格式不合规（序号 {i + 1}），跳过")
+            logger.warning(f"第 {i + 1} 个账号的学号缺失或格式不合规，跳过")
             continue
-        alias = f"用户 {i + 1}"
-        users.append(User(student_Id=int(sid), alias=alias, password=pwd))
-        logger.info(f"已加载用户配置：{alias}")
+        user = User(
+            student_Id=int(sid),
+            alias=str(entry.get("alias") or f"用户 {i + 1}"),
+            password=str(entry.get("password") or DEFAULT_PASSWORD),
+        )
+        users.append(user)
+        logger.info(f"已加载账号：{user.alias}（{sid}）")
 
     return users
 
@@ -393,17 +424,20 @@ def load_users_from_env():
 # ============================================================
 
 async def main():
+    config = load_config()
+    attach_file_logger(config)
+
     logger.info("=" * 50)
-    logger.info("AHUT 晚寝自动签到 - GitHub Actions 版启动")
+    logger.info("AHUT 晚寝自动签到启动")
     logger.info(f"当前时间：{get_time()['full']}")
     logger.info("=" * 50)
 
-    users = load_users_from_env()
+    users = load_users(config)
     if not users:
-        logger.error("未找到有效用户配置，程序退出。")
+        logger.error("未找到有效账号配置，程序退出。")
         sys.exit(1)
 
-    debug_mode = (os.environ.get("DEBUG_MODE") or "false").lower() == "true"
+    debug_mode = bool(config.get("sign", {}).get("debug_mode", False))
     if debug_mode:
         logger.warning("调试模式开启：忽略签到时间限制")
 
@@ -442,24 +476,20 @@ async def main():
         title = f"⚠️ AHUT 晚寝签到部分失败（{success_count}/{len(users)}）"
 
     notify_config = {
-        "serverchan": {
-            "sendkey": os.environ.get("SERVERCHAN_SENDKEY", "").strip(),
-        },
-        "ntfy": {
-            "topic": os.environ.get("NTFY_TOPIC", "").strip(),
-        },
+        "serverchan": config.get("notify", {}).get("serverchan", {}),
+        "ntfy": config.get("notify", {}).get("ntfy", {}),
     }
 
     notifier = Notifier(notify_config)
 
     # 1. Server 酱日常微信报表
-    if notify_config["serverchan"]["sendkey"]:
+    if notify_config["serverchan"].get("sendkey", "").strip():
         logger.info("正在发送 Server 酱日常签到报告...")
         text_content = build_sign_result_text(results, users, elapsed)
         notifier._send_serverchan(title, text_content)
 
     # 2. ntfy 仅在签到失败时触发 Priority 5 强穿透夜间告警
-    if notify_config["ntfy"]["topic"]:
+    if notify_config["ntfy"].get("topic", "").strip():
         if not all_success:
             logger.info("检测到签到存在失败人员，正在触发 ntfy 紧急强穿透告警...")
             ntfy_title = "🚨 AHUT 晚寝签到失败告警！"

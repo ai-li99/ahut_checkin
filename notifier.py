@@ -59,7 +59,7 @@ class Notifier:
             logger.warning("ntfy Topic 未配置，跳过 ntfy 发送")
             return False
 
-        server = self.ntfy_cfg.get("server", "https://ntfy.sh").rstrip("/")
+        server = (self.ntfy_cfg.get("server") or "https://ntfy.sh").rstrip("/")
         # ntfy 官方 JSON 发布规范：必须 POST 到根端点（如 https://ntfy.sh），由 JSON 体内的 "topic" 指定目标
         # 若拼接 /topic，服务端将 Body 视为 Raw 纯文本，会导致 priority 丢失降级为默认 3
         url = f"{server}"
